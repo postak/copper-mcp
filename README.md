@@ -33,7 +33,7 @@ MCP server for the [Copper CRM](https://www.copper.com/) API. Search contacts, l
    - `COPPER_USER_EMAIL` - Your Copper account email
    - `COPPER_USER_ID` - Your Copper user ID
 
-## Usage with Claude Code
+## Usage with Claude Code via stdio interface
 
 Add to your Claude Code MCP config (`~/.claude.json`):
 
@@ -87,16 +87,24 @@ By default, the server listens on port `3000` (or the port defined by the `PORT`
 gcloud auth login
 gcloud config set project YOUR_PROJECT_ID
 ```
+### 1. Create Oauth Client in Google Cloud Console
 
-### 1. Create secrets in Secret Manager
+In Google Cloud console, go to **APIs & Services → Credentials**
+
+Create a new **OAuth client ID** with type **Web application**
+Set **Authorized redirect URIs** to `https://<cloud-run-url>/google/callback`
+
+cloud-run-url: "https://<servicename>-<projectnumber>-<region>.run.app
+
+### 2. Create secrets in Secret Manager
 
 ```bash
 echo -n "your-copper-api-key"    | gcloud secrets create COPPER_API_KEY    --data-file=-
 echo -n "your-copper-email"      | gcloud secrets create COPPER_USER_EMAIL  --data-file=-
 echo -n "your-copper-user-id"    | gcloud secrets create COPPER_USER_ID     --data-file=-
-echo -n "your-google-client-id"  | gcloud secrets create GOOGLE_CLIENT_ID   --data-file=-
-echo -n "your-google-secret"     | gcloud secrets create GOOGLE_CLIENT_SECRET --data-file=-
-openssl rand -base64 32          | gcloud secrets create JWT_SECRET         --data-file=-
+echo -n "your-google-client-id"  | gcloud secrets create COPPER_GOOGLE_CLIENT_ID   --data-file=-
+echo -n "your-google-secret"     | gcloud secrets create COPPER_GOOGLE_CLIENT_SECRET --data-file=-
+openssl rand -base64 32          | gcloud secrets create COPPER_JWT_SECRET         --data-file=-
 ```
 
 ### 2. Build and push the image
@@ -115,7 +123,9 @@ docker push ${IMAGE}:latest
 
 ```bash
 SERVICE=copper-mcp
-SERVER_URL=https://copper-mcp-placeholder.a.run.app  # update after first deploy
+REGION=europe-west8
+PROJECT_NUMBER=$(gcloud projects describe $(gcloud config get-value project) --format="value(projectNumber)")
+SERVER_URL=https://${SERVICE}-${PROJECT_NUMBER}-${REGION}.run.app
 
 gcloud run deploy ${SERVICE} \
   --image=${IMAGE}:latest \
@@ -124,7 +134,7 @@ gcloud run deploy ${SERVICE} \
   --no-allow-unauthenticated \
   --port=8080 \
   --set-env-vars=NODE_ENV=production,SERVER_URL=${SERVER_URL} \
-  --set-secrets=COPPER_API_KEY=COPPER_API_KEY:latest,COPPER_USER_EMAIL=COPPER_USER_EMAIL:latest,COPPER_USER_ID=COPPER_USER_ID:latest,GOOGLE_CLIENT_ID=GOOGLE_CLIENT_ID:latest,GOOGLE_CLIENT_SECRET=GOOGLE_CLIENT_SECRET:latest,JWT_SECRET=JWT_SECRET:latest
+  --set-secrets=COPPER_API_KEY=COPPER_API_KEY:latest,COPPER_USER_EMAIL=COPPER_USER_EMAIL:latest,COPPER_USER_ID=COPPER_USER_ID:latest,COPPER_GOOGLE_CLIENT_ID=COPPER_GOOGLE_CLIENT_ID:latest,COPPER_GOOGLE_CLIENT_SECRET=COPPER_GOOGLE_CLIENT_SECRET:latest,COPPER_JWT_SECRET=COPPER_JWT_SECRET:latest
 ```
 
 After the first deploy, get the assigned URL and update `SERVER_URL`:

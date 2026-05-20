@@ -502,11 +502,11 @@ async function main() {
 
     // OAuth env vars required in HTTP mode
     const serverUrl = process.env.SERVER_URL;
-    const googleClientId = process.env.GOOGLE_CLIENT_ID;
-    const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
-    const jwtSecret = process.env.JWT_SECRET;
+    const googleClientId = process.env.COPPER_GOOGLE_CLIENT_ID;
+    const googleClientSecret = process.env.COPPER_GOOGLE_CLIENT_SECRET;
+    const jwtSecret = process.env.COPPER_JWT_SECRET;
     if (!serverUrl || !googleClientId || !googleClientSecret || !jwtSecret) {
-      console.error("SERVER_URL, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and JWT_SECRET are required in HTTP mode");
+      console.error("SERVER_URL, COPPER_GOOGLE_CLIENT_ID, COPPER_GOOGLE_CLIENT_SECRET, and COPPER_JWT_SECRET are required in HTTP mode");
       process.exit(1);
     }
 

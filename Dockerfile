@@ -8,5 +8,6 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json server.js ./
 ENV NODE_ENV=production
+ENV PORT=8080
 EXPOSE 8080
-CMD ["node", "server.js"]
+CMD ["node", "server.js", "--sse"]
