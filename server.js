@@ -121,7 +121,23 @@ function createGoogleOAuthProvider({ serverUrl, googleClientId, googleClientSecr
 
     get clientsStore() {
       return {
-        getClient: async (clientId) => registeredClients.get(clientId) ?? null,
+        getClient: async (clientId) => {
+          let client = registeredClients.get(clientId);
+          if (!client) {
+            // Auto-register client to survive server restarts/redeploys in stateless environments (Cloud Run)
+            client = {
+              client_id: clientId,
+              client_id_issued_at: Math.floor(Date.now() / 1000),
+              redirect_uris: [
+                "https://claude.ai/api/mcp/auth_callback",
+                "https://claude.com/api/mcp/auth_callback"
+              ],
+              client_name: "Claude",
+            };
+            registeredClients.set(clientId, client);
+          }
+          return client;
+        },
         registerClient: async (client) => {
           const registered = {
             ...client,

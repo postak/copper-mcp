@@ -94,7 +94,7 @@ In Google Cloud console, go to **APIs & Services → Credentials**
 Create a new **OAuth client ID** with type **Web application**
 Set **Authorized redirect URIs** to `https://<cloud-run-url>/google/callback`
 
-cloud-run-url: "https://<servicename>-<projectnumber>-<region>.run.app
+cloud-run-url: "https://<servicename>-<projectnumber>.<region>.run.app"
 
 ### 2. Create secrets in Secret Manager
 
@@ -107,28 +107,18 @@ echo -n "your-google-secret"     | gcloud secrets create COPPER_GOOGLE_CLIENT_SE
 openssl rand -base64 32          | gcloud secrets create COPPER_JWT_SECRET         --data-file=-
 ```
 
-### 2. Build and push the image
+### 2. Deploy to Cloud Run
 
-```bash
-REGION=europe-west8
-PROJECT_ID=$(gcloud config get-value project)
-IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/cloud-run/copper-mcp"
-
-gcloud auth configure-docker ${REGION}-docker.pkg.dev
-docker build -t ${IMAGE}:latest .
-docker push ${IMAGE}:latest
-```
-
-### 3. Deploy
+Deploy directly from the local source. Cloud Run will automatically build the container image in the cloud using Cloud Build and deploy it:
 
 ```bash
 SERVICE=copper-mcp
 REGION=europe-west8
 PROJECT_NUMBER=$(gcloud projects describe $(gcloud config get-value project) --format="value(projectNumber)")
-SERVER_URL=https://${SERVICE}-${PROJECT_NUMBER}-${REGION}.run.app
+SERVER_URL=https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app
 
 gcloud run deploy ${SERVICE} \
-  --image=${IMAGE}:latest \
+  --source . \
   --region=${REGION} \
   --platform=managed \
   --no-allow-unauthenticated \
@@ -137,17 +127,8 @@ gcloud run deploy ${SERVICE} \
   --set-secrets=COPPER_API_KEY=COPPER_API_KEY:latest,COPPER_USER_EMAIL=COPPER_USER_EMAIL:latest,COPPER_USER_ID=COPPER_USER_ID:latest,COPPER_GOOGLE_CLIENT_ID=COPPER_GOOGLE_CLIENT_ID:latest,COPPER_GOOGLE_CLIENT_SECRET=COPPER_GOOGLE_CLIENT_SECRET:latest,COPPER_JWT_SECRET=COPPER_JWT_SECRET:latest
 ```
 
-After the first deploy, get the assigned URL and update `SERVER_URL`:
 
-```bash
-SERVER_URL=$(gcloud run services describe ${SERVICE} --region=${REGION} --format='value(status.url)')
-
-gcloud run services update ${SERVICE} \
-  --region=${REGION} \
-  --update-env-vars=SERVER_URL=${SERVER_URL}
-```
-
-### 4. Configure Claude Desktop
+### 3. Configure Claude Desktop
 
 ```json
 {
