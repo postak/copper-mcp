@@ -53,6 +53,112 @@ Add to your Claude Code MCP config (`~/.claude.json`):
 }
 ```
 
+## Running with SSE Transport
+
+The server supports running as a standalone HTTP server with SSE (Server-Sent Events) transport in addition to the default `stdio` transport.
+
+### 1. Start the Server
+
+To start the server in SSE mode, run:
+```bash
+npm run sse
+```
+
+Or manually:
+```bash
+node server.js --sse --port 3000
+```
+
+By default, the server listens on port `3000` (or the port defined by the `PORT` environment variable).
+
+### 2. Configure in Client
+
+- **Streamable HTTP** (Recommended / modern MCP protocol):
+  - SSE Endpoint: `http://localhost:3000/mcp`
+- **Deprecated HTTP + SSE** (For older clients):
+  - SSE Endpoint: `http://localhost:3000/sse`
+  - Message Endpoint: `http://localhost:3000/messages`
+
+## Deploy to Cloud Run
+
+### Prerequisites
+
+```bash
+gcloud auth login
+gcloud config set project YOUR_PROJECT_ID
+```
+
+### 1. Create secrets in Secret Manager
+
+```bash
+echo -n "your-copper-api-key"    | gcloud secrets create COPPER_API_KEY    --data-file=-
+echo -n "your-copper-email"      | gcloud secrets create COPPER_USER_EMAIL  --data-file=-
+echo -n "your-copper-user-id"    | gcloud secrets create COPPER_USER_ID     --data-file=-
+echo -n "your-google-client-id"  | gcloud secrets create GOOGLE_CLIENT_ID   --data-file=-
+echo -n "your-google-secret"     | gcloud secrets create GOOGLE_CLIENT_SECRET --data-file=-
+openssl rand -base64 32          | gcloud secrets create JWT_SECRET         --data-file=-
+```
+
+### 2. Build and push the image
+
+```bash
+REGION=europe-west8
+PROJECT_ID=$(gcloud config get-value project)
+IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/cloud-run/copper-mcp"
+
+gcloud auth configure-docker ${REGION}-docker.pkg.dev
+docker build -t ${IMAGE}:latest .
+docker push ${IMAGE}:latest
+```
+
+### 3. Deploy
+
+```bash
+SERVICE=copper-mcp
+SERVER_URL=https://copper-mcp-placeholder.a.run.app  # update after first deploy
+
+gcloud run deploy ${SERVICE} \
+  --image=${IMAGE}:latest \
+  --region=${REGION} \
+  --platform=managed \
+  --no-allow-unauthenticated \
+  --port=8080 \
+  --set-env-vars=NODE_ENV=production,SERVER_URL=${SERVER_URL} \
+  --set-secrets=COPPER_API_KEY=COPPER_API_KEY:latest,COPPER_USER_EMAIL=COPPER_USER_EMAIL:latest,COPPER_USER_ID=COPPER_USER_ID:latest,GOOGLE_CLIENT_ID=GOOGLE_CLIENT_ID:latest,GOOGLE_CLIENT_SECRET=GOOGLE_CLIENT_SECRET:latest,JWT_SECRET=JWT_SECRET:latest
+```
+
+After the first deploy, get the assigned URL and update `SERVER_URL`:
+
+```bash
+SERVER_URL=$(gcloud run services describe ${SERVICE} --region=${REGION} --format='value(status.url)')
+
+gcloud run services update ${SERVICE} \
+  --region=${REGION} \
+  --update-env-vars=SERVER_URL=${SERVER_URL}
+```
+
+### 4. Configure Claude Desktop
+
+```json
+{
+  "mcpServers": {
+    "copper-crm": {
+      "type": "http",
+      "url": "https://<cloud-run-url>/mcp"
+    }
+  }
+}
+```
+
+On first connection Claude Desktop will open the browser for Google login.
+
+### Google OAuth setup
+
+Create an OAuth 2.0 client in **Google Cloud Console → API & Services → Credentials**:
+- Type: **Web application**
+- Consent screen: set to **Internal** (restricts access to your Workspace domain)
+- Authorized redirect URI: `https://<cloud-run-url>/google/callback`
+
 ## License
 
 MIT

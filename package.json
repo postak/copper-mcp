@@ -5,13 +5,22 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "sse": "node server.js --sse",
+    "dev": "MCP_DANGEROUSLY_ALLOW_INSECURE_ISSUER_URL=1 node server.js --sse"
   },
-  "keywords": ["mcp", "copper", "crm", "activities"],
+  "keywords": [
+    "mcp",
+    "copper",
+    "crm",
+    "activities"
+  ],
   "author": "David Azanza",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "express": "^5.2.1",
+    "google-auth-library": "^9.0.0",
     "zod": "^4.3.6"
   }
 }

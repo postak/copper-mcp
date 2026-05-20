@@ -1,0 +1,50 @@
+substitutions:
+  _REGION: europe-west8
+  _SERVICE: copper-mcp
+  _IMAGE: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/cloud-run/${_SERVICE}
+  # Public URL of the Cloud Run service — used as OAuth issuer and callback base
+  _SERVER_URL: https://copper-mcp-placeholder.a.run.app
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_IMAGE}:${SHORT_SHA}
+      - -t
+      - ${_IMAGE}:latest
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_IMAGE}
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_IMAGE}:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --port=8080
+      - --set-env-vars=NODE_ENV=production,SERVER_URL=${_SERVER_URL}
+      # Secrets must be created in Secret Manager before first deploy:
+      #   gcloud secrets create COPPER_API_KEY --data-file=-
+      #   gcloud secrets create COPPER_USER_EMAIL --data-file=-
+      #   gcloud secrets create COPPER_USER_ID --data-file=-
+      #   gcloud secrets create GOOGLE_CLIENT_ID --data-file=-
+      #   gcloud secrets create GOOGLE_CLIENT_SECRET --data-file=-
+      #   gcloud secrets create JWT_SECRET --data-file=-
+      - --set-secrets=COPPER_API_KEY=COPPER_API_KEY:latest,COPPER_USER_EMAIL=COPPER_USER_EMAIL:latest,COPPER_USER_ID=COPPER_USER_ID:latest,GOOGLE_CLIENT_ID=GOOGLE_CLIENT_ID:latest,GOOGLE_CLIENT_SECRET=GOOGLE_CLIENT_SECRET:latest,JWT_SECRET=JWT_SECRET:latest
+
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
