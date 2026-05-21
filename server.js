@@ -1,4 +1,3 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -6,15 +5,15 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
-import { OAuth2Client } from "google-auth-library";
-import { randomUUID, createHmac, timingSafeEqual } from "node:crypto";
-import { z } from "zod";
+import { randomUUID } from "node:crypto";
+import { initCopperClient } from "./copper.js";
+import { createGoogleOAuthProvider } from "./auth.js";
+import { createServer } from "./tools.js";
 
 if (typeof process.loadEnvFile === "function") {
   try { process.loadEnvFile(); } catch {}
 }
 
-// --- Copper Config ---
 const API_KEY = process.env.COPPER_API_KEY;
 const USER_EMAIL = process.env.COPPER_USER_EMAIL;
 const USER_ID = process.env.COPPER_USER_ID;
@@ -23,526 +22,316 @@ if (!API_KEY || !USER_EMAIL || !USER_ID) {
   process.exit(1);
 }
 
-const BASE_URL = "https://api.copper.com/developer_api/v1";
-const HEADERS = {
-  "X-PW-AccessToken": API_KEY,
-  "X-PW-Application": "developer_api",
-  "X-PW-UserEmail": USER_EMAIL,
-  "Content-Type": "application/json",
-};
+initCopperClient({ apiKey: API_KEY, userEmail: USER_EMAIL });
 
-async function copperFetch(path, { method = "GET", body } = {}) {
-  const opts = { method, headers: HEADERS };
-  if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(`${BASE_URL}${path}`, opts);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Copper API ${res.status}: ${text}`);
-  }
-  return res.json();
-}
-
-async function resolveParentName(type, id, cache) {
-  const key = `${type}:${id}`;
-  if (cache.has(key)) return cache.get(key);
-  const endpoints = {
-    person: `/people/${id}`,
-    company: `/companies/${id}`,
-    lead: `/leads/${id}`,
-    opportunity: `/opportunities/${id}`,
-  };
-  const endpoint = endpoints[type];
-  if (!endpoint) {
-    const fallback = `${type} #${id}`;
-    cache.set(key, fallback);
-    return fallback;
-  }
-  try {
-    const record = await copperFetch(endpoint);
-    const name = record.name || record.first_name
-      ? [record.first_name, record.last_name].filter(Boolean).join(" ") || record.name
-      : `${type} #${id}`;
-    cache.set(key, name);
-    return name;
-  } catch {
-    const fallback = `${type} #${id}`;
-    cache.set(key, fallback);
-    return fallback;
-  }
-}
-
-function jsonResult(data) {
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-}
-function errorResult(msg) {
-  return { content: [{ type: "text", text: JSON.stringify({ error: msg }, null, 2) }], isError: true };
-}
-
-// --- JWT Helpers ---
-function b64url(buf) {
-  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
-}
-
-function signJwt(payload, secret) {
-  const hdr = b64url(Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })));
-  const body = b64url(Buffer.from(JSON.stringify(payload)));
-  const sig = b64url(createHmac("sha256", secret).update(`${hdr}.${body}`).digest());
-  return `${hdr}.${body}.${sig}`;
-}
-
-function verifyJwt(token, secret) {
-  const parts = token.split(".");
-  if (parts.length !== 3) throw new Error("Invalid JWT format");
-  const [hdr, body, sig] = parts;
-  const expected = b64url(createHmac("sha256", secret).update(`${hdr}.${body}`).digest());
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) throw new Error("Invalid JWT signature");
-  return JSON.parse(Buffer.from(body, "base64url").toString());
-}
-
-// --- Google OAuth Provider ---
-function createGoogleOAuthProvider({ serverUrl, googleClientId, googleClientSecret, jwtSecret }) {
-  const callbackUrl = new URL("/google/callback", serverUrl).href;
-
-  const registeredClients = new Map();
-  const pendingAuth = new Map();  // googleState → {clientId, redirectUri, state, codeChallenge, expiresAt}
-  const pendingCodes = new Map(); // authCode    → {email, clientId, codeChallenge, expiresAt}
-
-  const cleanup = setInterval(() => {
-    const now = Date.now();
-    for (const [k, v] of pendingAuth) if (v.expiresAt < now) pendingAuth.delete(k);
-    for (const [k, v] of pendingCodes) if (v.expiresAt < now) pendingCodes.delete(k);
-  }, 5 * 60 * 1000);
-  cleanup.unref();
-
-  return {
-    // --- OAuthServerProvider interface ---
-
-    get clientsStore() {
-      return {
-        getClient: async (clientId) => {
-          let client = registeredClients.get(clientId);
-          if (!client) {
-            // Auto-register client to survive server restarts/redeploys in stateless environments (Cloud Run)
-            client = {
-              client_id: clientId,
-              client_id_issued_at: Math.floor(Date.now() / 1000),
-              redirect_uris: [
-                "https://claude.ai/api/mcp/auth_callback",
-                "https://claude.com/api/mcp/auth_callback"
-              ],
-              client_name: "Claude",
-            };
-            registeredClients.set(clientId, client);
-          }
-          return client;
-        },
-        registerClient: async (client) => {
-          const registered = {
-            ...client,
-            client_id: client.client_id || randomUUID(),
-            client_id_issued_at: Math.floor(Date.now() / 1000),
-          };
-          registeredClients.set(registered.client_id, registered);
-          return registered;
-        },
-      };
-    },
-
-    async authorize(client, params, res) {
-      const googleState = randomUUID();
-      pendingAuth.set(googleState, {
-        clientId: client.client_id,
-        redirectUri: params.redirectUri,
-        state: params.state,
-        codeChallenge: params.codeChallenge,
-        expiresAt: Date.now() + 10 * 60 * 1000,
-      });
-
-      const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-      url.searchParams.set("client_id", googleClientId);
-      url.searchParams.set("redirect_uri", callbackUrl);
-      url.searchParams.set("response_type", "code");
-      url.searchParams.set("scope", "openid email");
-      url.searchParams.set("state", googleState);
-      url.searchParams.set("access_type", "online");
-      res.redirect(url.toString());
-    },
-
-    async challengeForAuthorizationCode(_client, authorizationCode) {
-      const entry = pendingCodes.get(authorizationCode);
-      if (!entry) throw new Error("Invalid authorization code");
-      return entry.codeChallenge;
-    },
-
-    async exchangeAuthorizationCode(client, authorizationCode) {
-      const entry = pendingCodes.get(authorizationCode);
-      if (!entry || entry.expiresAt < Date.now()) {
-        pendingCodes.delete(authorizationCode);
-        throw new Error("Invalid or expired authorization code");
-      }
-      pendingCodes.delete(authorizationCode);
-
-      const now = Math.floor(Date.now() / 1000);
-      return {
-        access_token: signJwt({
-          sub: entry.email,
-          iss: serverUrl,
-          aud: serverUrl,
-          iat: now,
-          exp: now + 3600,
-          client_id: client.client_id,
-          scopes: [],
-        }, jwtSecret),
-        token_type: "bearer",
-        expires_in: 3600,
-      };
-    },
-
-    async exchangeRefreshToken() {
-      throw new Error("Refresh tokens not supported — re-authenticate to get a new token");
-    },
-
-    async verifyAccessToken(token) {
-      const payload = verifyJwt(token, jwtSecret);
-      if (payload.exp < Math.floor(Date.now() / 1000)) throw new Error("Token expired");
-      if (payload.iss !== serverUrl) throw new Error("Invalid issuer");
-      return {
-        token,
-        clientId: payload.client_id,
-        scopes: payload.scopes ?? [],
-        expiresAt: payload.exp,
-        extra: { email: payload.sub },
-      };
-    },
-
-    // --- Google callback handler (mounted as a separate Express route) ---
-
-    async handleGoogleCallback(req, res) {
-      try {
-        const { code, state: googleState, error } = req.query;
-
-        if (error) {
-          res.status(400).send(`Google OAuth error: ${error}`);
-          return;
-        }
-        if (!code || !googleState) {
-          res.status(400).send("Missing code or state");
-          return;
-        }
-
-        const pending = pendingAuth.get(googleState);
-        if (!pending || pending.expiresAt < Date.now()) {
-          pendingAuth.delete(googleState);
-          res.status(400).send("Invalid or expired OAuth state — please restart the sign-in flow");
-          return;
-        }
-        pendingAuth.delete(googleState);
-
-        const oauth2Client = new OAuth2Client(googleClientId, googleClientSecret, callbackUrl);
-        const { tokens } = await oauth2Client.getToken(code);
-        const ticket = await oauth2Client.verifyIdToken({
-          idToken: tokens.id_token,
-          audience: googleClientId,
-        });
-        const email = ticket.getPayload().email;
-
-        const authCode = randomUUID();
-        pendingCodes.set(authCode, {
-          email,
-          clientId: pending.clientId,
-          codeChallenge: pending.codeChallenge,
-          expiresAt: Date.now() + 5 * 60 * 1000,
-        });
-
-        const redirectUrl = new URL(pending.redirectUri);
-        redirectUrl.searchParams.set("code", authCode);
-        if (pending.state) redirectUrl.searchParams.set("state", pending.state);
-        res.redirect(redirectUrl.toString());
-      } catch (err) {
-        console.error("Google callback error:", err);
-        res.status(500).send("Authentication failed");
-      }
-    },
-  };
-}
-
-// --- MCP Server Factory ---
-function createServer() {
-  const server = new McpServer({
-    name: "copper-crm",
-    version: "1.0.0",
-  });
-
-  server.tool(
-    "search_people",
-    "Search Copper contacts by name, email, or phone. Returns matching person records with IDs for use in create_activity.",
-    {
-      name: z.string().optional().describe("Full name or partial name to search"),
-      emails: z.array(z.string()).optional().describe("Email addresses to match"),
-      phone_number: z.string().optional().describe("Phone number to match"),
-      page_size: z.number().optional().describe("Results per page (default 20, max 200)"),
-      page_number: z.number().optional().describe("Page number (default 1)"),
-    },
-    async ({ name, emails, phone_number, page_size, page_number }) => {
-      const body = {};
-      if (name) body.name = name;
-      if (emails) body.emails = emails;
-      if (phone_number) body.phone_number = phone_number;
-      body.page_size = page_size || 20;
-      body.page_number = page_number || 1;
-
-      const results = await copperFetch("/people/search", { method: "POST", body });
-      const people = results.map((p) => ({
-        id: p.id,
-        name: p.name,
-        first_name: p.first_name,
-        last_name: p.last_name,
-        emails: p.emails,
-        phone_numbers: p.phone_numbers,
-        company_id: p.company_id,
-        company_name: p.company_name,
-        title: p.title,
-      }));
-      return jsonResult(people);
-    }
-  );
-
-  server.tool(
-    "get_person",
-    "Get full details of a Copper contact by their ID.",
-    { person_id: z.number().describe("Copper person ID") },
-    async ({ person_id }) => jsonResult(await copperFetch(`/people/${person_id}`))
-  );
-
-  server.tool(
-    "create_person",
-    "Create a new person (contact) in Copper CRM.",
-    {
-      first_name: z.string().describe("First name"),
-      last_name: z.string().describe("Last name"),
-      title: z.string().optional().describe("Job title"),
-      company_name: z.string().optional().describe("Company name (Copper auto-links or creates)"),
-      emails: z.array(z.object({
-        email: z.string(),
-        category: z.enum(["work", "personal", "other"]).optional()
-      })).optional().describe("Email addresses"),
-      phone_numbers: z.array(z.object({
-        number: z.string(),
-        category: z.enum(["work", "mobile", "home", "other"]).optional()
-      })).optional().describe("Phone numbers"),
-      tags: z.array(z.string()).optional().describe("Tags for categorization"),
-      contact_type_id: z.number().optional().describe("Contact type ID"),
-    },
-    async ({ first_name, last_name, title, company_name, emails, phone_numbers, tags, contact_type_id }) => {
-      const body = { name: `${first_name} ${last_name}` };
-      if (first_name) body.first_name = first_name;
-      if (last_name) body.last_name = last_name;
-      if (title) body.title = title;
-      if (company_name) body.company_name = company_name;
-      if (emails) body.emails = emails;
-      if (phone_numbers) body.phone_numbers = phone_numbers;
-      if (tags) body.tags = tags;
-      if (contact_type_id) body.contact_type_id = contact_type_id;
-      return jsonResult(await copperFetch("/people", { method: "POST", body }));
-    }
-  );
-
-  server.tool(
-    "update_person",
-    "Update an existing person (contact) in Copper CRM. Only include fields you want to change. The 'details' field is the 'About' section visible at the top of the contact page.",
-    {
-      person_id: z.number().describe("Copper person ID to update"),
-      details: z.string().optional().describe("About/details text (visible at top of contact page in Copper UI)"),
-      title: z.string().optional().describe("Job title"),
-      tags: z.array(z.string()).optional().describe("Tags (replaces existing tags)"),
-    },
-    async ({ person_id, details, title, tags }) => {
-      const body = {};
-      if (details !== undefined) body.details = details;
-      if (title !== undefined) body.title = title;
-      if (tags !== undefined) body.tags = tags;
-      const result = await copperFetch(`/people/${person_id}`, { method: "PUT", body });
-      return jsonResult({ id: result.id, name: result.name, details: result.details, title: result.title, tags: result.tags });
-    }
-  );
-
-  server.tool(
-    "search_companies",
-    "Search Copper companies by name. Returns matching company records.",
-    {
-      name: z.string().optional().describe("Company name to search"),
-      page_size: z.number().optional().describe("Results per page (default 20, max 200)"),
-      page_number: z.number().optional().describe("Page number (default 1)"),
-    },
-    async ({ name, page_size, page_number }) => {
-      const body = {};
-      if (name) body.name = name;
-      body.page_size = page_size || 20;
-      body.page_number = page_number || 1;
-      const results = await copperFetch("/companies/search", { method: "POST", body });
-      return jsonResult(results.map((c) => ({
-        id: c.id,
-        name: c.name,
-        email_domain: c.email_domain,
-        phone_numbers: c.phone_numbers,
-        websites: c.websites,
-        address: c.address,
-      })));
-    }
-  );
-
-  server.tool(
-    "list_activity_types",
-    "List all available activity types in Copper (e.g., Note, Meeting, Phone Call). Returns activity_type_id values needed for create_activity.",
-    {},
-    async () => jsonResult(await copperFetch("/activity_types"))
-  );
-
-  server.tool(
-    "create_activity",
-    "Log an activity (meeting note, phone call, etc.) against a Copper person or company. Use list_activity_types first to get the correct activity_type_id.",
-    {
-      parent_type: z.enum(["person", "company"]).describe("Type of record to log against"),
-      parent_id: z.number().describe("Copper ID of the person or company"),
-      activity_type_id: z.number().describe("Activity type ID (from list_activity_types)"),
-      details: z.string().describe("Activity content — meeting notes, action items, summary, etc. Use plain text, not markdown."),
-      activity_date: z.number().optional().describe("Unix timestamp for when the activity occurred (default: now)"),
-    },
-    async ({ parent_type, parent_id, activity_type_id, details, activity_date }) => {
-      const body = {
-        parent: { type: parent_type, id: parent_id },
-        type: { id: activity_type_id, category: "user" },
-        user_id: parseInt(USER_ID),
-        details,
-      };
-      if (activity_date) body.activity_date = activity_date;
-      const result = await copperFetch("/activities", { method: "POST", body });
-      return jsonResult({ id: result.id, parent: result.parent, type: result.type, details: result.details, activity_date: result.activity_date });
-    }
-  );
-
-  server.tool(
-    "list_opportunities",
-    "Search Copper opportunities (deals). Optionally filter by name, company, person, status_ids, tags, minimum_close_date, maximum_close_date, pipeline_stage_ids, pipeline_ids. Returns deal name, value, status, and pipeline stage.",
-    {
-      name: z.string().optional().describe("Opportunity name to search"),
-      company_ids: z.array(z.number()).optional().describe("Filter by company IDs"),
-      person_ids: z.array(z.number()).optional().describe("Filter by associated person IDs"),
-      page_size: z.number().optional().describe("Results per page (default 20, max 200)"),
-      page_number: z.number().optional().describe("Page number (default 1)"),
-      status_ids: z.array(z.number()).optional().describe("Filter by status IDs"),
-      tags: z.array(z.string()).optional().describe("Filter by tags"),
-      minimum_close_date: z.number().optional().describe("Filter by minimum close date (Unix timestamp)"),
-      maximum_close_date: z.number().optional().describe("Filter by maximum close date (Unix timestamp)"),
-      pipeline_stage_ids: z.array(z.number()).optional().describe("Filter by pipeline stage IDs"),
-      pipeline_ids: z.array(z.number()).optional().describe("Filter by pipeline IDs"),
-    },
-    async ({ name, company_ids, person_ids, page_size, page_number, status_ids, tags, minimum_close_date, maximum_close_date, pipeline_stage_ids, pipeline_ids }) => {
-      const body = {};
-      if (name) body.name = name;
-      if (company_ids) body.company_ids = company_ids;
-      if (person_ids) body.person_ids = person_ids;
-      if (status_ids) body.status_ids = status_ids;
-      if (tags) body.tags = tags;
-      if (minimum_close_date) body.minimum_close_date = minimum_close_date;
-      if (maximum_close_date) body.maximum_close_date = maximum_close_date;
-      if (pipeline_stage_ids) body.pipeline_stage_ids = pipeline_stage_ids;
-      if (pipeline_ids) body.pipeline_ids = pipeline_ids;
-      body.page_size = page_size || 20;
-      body.page_number = page_number || 1;
-      const results = await copperFetch("/opportunities/search", { method: "POST", body });
-      return jsonResult(results.map((o) => ({
-        id: o.id, name: o.name, company_id: o.company_id, company_name: o.company_name,
-        monetary_value: o.monetary_value, status: o.status, pipeline_id: o.pipeline_id,
-        pipeline_stage_id: o.pipeline_stage_id, close_date: o.close_date, win_probability: o.win_probability,
-      })));
-    }
-  );
-
-  server.tool(
-    "list_activities",
-    "Search Copper activities (meeting notes, calls, emails logged against contacts). Filter by parent record, activity type, or date range. Returns resolved parent names. Excludes system activities (assignee/status changes) by default.",
-    {
-      parent_type: z.enum(["person", "company", "lead", "opportunity", "project", "task"]).optional().describe("Filter by parent entity type"),
-      parent_id: z.number().optional().describe("Filter by parent entity ID (requires parent_type)"),
-      minimum_activity_date: z.number().optional().describe("Unix timestamp — only activities on or after this date"),
-      maximum_activity_date: z.number().optional().describe("Unix timestamp — only activities on or before this date"),
-      include_system: z.boolean().optional().describe("Include system activities like assignee/status changes (default: false)"),
-      page_size: z.number().optional().describe("Results per page (default 20, max 200)"),
-      page_number: z.number().optional().describe("Page number (default 1)"),
-    },
-    async ({ parent_type, parent_id, minimum_activity_date, maximum_activity_date, include_system, page_size, page_number }) => {
-      const body = {};
-      if (parent_type && parent_id) body.parent = { id: parent_id, type: parent_type };
-      if (minimum_activity_date) body.minimum_activity_date = minimum_activity_date;
-      if (maximum_activity_date) body.maximum_activity_date = maximum_activity_date;
-      body.page_size = page_size || 200;
-      body.page_number = page_number || 1;
-
-      const results = await copperFetch("/activities/search", { method: "POST", body });
-      const filtered = include_system ? results : results.filter((a) => a.type?.category === "user");
-      const nameCache = new Map();
-      const activities = await Promise.all(
-        filtered.map(async (a) => {
-          const parentType = a.parent?.type;
-          const parentId = a.parent?.id;
-          const parent_name = parentType && parentId
-            ? await resolveParentName(parentType, parentId, nameCache)
-            : null;
-          return { id: a.id, parent: a.parent, parent_name, type: a.type, user_id: a.user_id, details: a.details, activity_date: a.activity_date, date_created: a.date_created, date_modified: a.date_modified };
-        })
-      );
-      return jsonResult(activities);
-    }
-  );
-
-  server.tool(
-    "list_pipelines",
-    "List all pipelines in Copper CRM. Returns pipeline IDs, names, and their stages — useful for filtering opportunities by pipeline_id or pipeline_stage_id.",
-    {},
-    async () => jsonResult(await copperFetch("/pipelines"))
-  );
-
-  return server;
-}
-
-// --- Start ---
 async function main() {
   const useSse = process.argv.includes("--sse") || process.argv.includes("-sse") || process.env.PORT;
 
   if (useSse) {
     const portIndex = process.argv.indexOf("--port");
     const port = portIndex !== -1 ? parseInt(process.argv[portIndex + 1], 10) : parseInt(process.env.PORT || "3000", 10);
+    const noAuth = process.argv.includes("--no-auth");
 
-    // OAuth env vars required in HTTP mode
-    const serverUrl = process.env.SERVER_URL;
-    const googleClientId = process.env.COPPER_GOOGLE_CLIENT_ID;
-    const googleClientSecret = process.env.COPPER_GOOGLE_CLIENT_SECRET;
-    const jwtSecret = process.env.COPPER_JWT_SECRET;
-    if (!serverUrl || !googleClientId || !googleClientSecret || !jwtSecret) {
-      console.error("SERVER_URL, COPPER_GOOGLE_CLIENT_ID, COPPER_GOOGLE_CLIENT_SECRET, and COPPER_JWT_SECRET are required in HTTP mode");
-      process.exit(1);
-    }
-
-    const oauthProvider = createGoogleOAuthProvider({ serverUrl, googleClientId, googleClientSecret, jwtSecret });
     const app = createMcpExpressApp({ host: "0.0.0.0" });
+    app.set("trust proxy", 1); // Trust Cloud Run's load balancer for X-Forwarded-For
     const transports = {};
 
-    // OAuth endpoints: /.well-known/oauth-authorization-server, /.well-known/oauth-protected-resource,
-    //                  /authorize, /token, /register
-    app.use(mcpAuthRouter({
-      provider: oauthProvider,
-      issuerUrl: new URL(serverUrl),
-      baseUrl: new URL(serverUrl),
-      resourceName: "Copper CRM MCP Server",
-    }));
+    let bearerAuth = (req, res, next) => next();
+    let serverUrl = process.env.SERVER_URL || `http://localhost:${port}`;
 
-    // Google's redirect back after login
-    app.get("/google/callback", (req, res) => oauthProvider.handleGoogleCallback(req, res));
+    if (!noAuth) {
+      serverUrl = process.env.SERVER_URL;
+      const googleClientId = process.env.COPPER_GOOGLE_CLIENT_ID;
+      const googleClientSecret = process.env.COPPER_GOOGLE_CLIENT_SECRET;
+      const jwtSecret = process.env.COPPER_JWT_SECRET;
+      if (!serverUrl || !googleClientId || !googleClientSecret || !jwtSecret) {
+        console.error("SERVER_URL, COPPER_GOOGLE_CLIENT_ID, COPPER_GOOGLE_CLIENT_SECRET, and COPPER_JWT_SECRET are required in HTTP mode");
+        process.exit(1);
+      }
 
-    const bearerAuth = requireBearerAuth({ verifier: oauthProvider });
+      const oauthProvider = createGoogleOAuthProvider({ serverUrl, googleClientId, googleClientSecret, jwtSecret });
+
+      // OAuth endpoints: /.well-known/oauth-authorization-server, /.well-known/oauth-protected-resource,
+      //                  /authorize, /token, /register
+      app.use(mcpAuthRouter({
+        provider: oauthProvider,
+        issuerUrl: new URL(serverUrl),
+        baseUrl: new URL(serverUrl),
+        resourceName: "Copper CRM MCP Server",
+      }));
+
+      app.get("/google/callback", (req, res) => oauthProvider.handleGoogleCallback(req, res));
+
+      bearerAuth = requireBearerAuth({ verifier: oauthProvider });
+    }
+
+    app.get("/", (req, res) => {
+      res.setHeader("Content-Type", "text/html");
+      res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Copper MCP Server</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(22, 28, 45, 0.4);
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --accent: #6366f1;
+      --accent-glow: rgba(99, 102, 241, 0.15);
+      --success: #10b981;
+      --success-glow: rgba(16, 185, 129, 0.2);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: 'Outfit', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem 1rem;
+      background-image: radial-gradient(circle at 50% 0%, rgba(99, 102, 241, 0.15) 0%, transparent 50%);
+    }
+    .container {
+      width: 100%;
+      max-width: 800px;
+      backdrop-filter: blur(12px);
+      background-color: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 3rem;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 2.5rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 1.5rem;
+    }
+    h1 {
+      font-size: 2.25rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #fff 0%, #a5b4fc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 0.5rem;
+    }
+    .subtitle { color: var(--text-muted); font-size: 1rem; }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: var(--success-glow);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: var(--success);
+      padding: 0.5rem 1rem;
+      border-radius: 9999px;
+      font-weight: 600;
+      font-size: 0.875rem;
+    }
+    .status-dot {
+      width: 8px; height: 8px;
+      background-color: var(--success);
+      border-radius: 50%;
+      box-shadow: 0 0 10px var(--success);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+      70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+    }
+    .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.5rem; margin-bottom: 3rem; }
+    .info-card {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.25rem;
+      transition: all 0.3s ease;
+    }
+    .info-card:hover { border-color: rgba(99, 102, 241, 0.4); transform: translateY(-2px); background: rgba(99, 102, 241, 0.02); }
+    .info-label { color: var(--text-muted); font-size: 0.875rem; margin-bottom: 0.25rem; }
+    .info-value { font-size: 1.1rem; font-weight: 600; }
+    .section-title { font-size: 1.25rem; font-weight: 600; margin-bottom: 1rem; color: #fff; }
+    .endpoint-list { display: flex; flex-direction: column; gap: 1rem; margin-bottom: 3rem; }
+    .endpoint-item {
+      display: flex; align-items: center; justify-content: space-between;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+    }
+    .endpoint-info { display: flex; align-items: center; gap: 1rem; }
+    .method {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem; font-weight: 700;
+      padding: 0.25rem 0.5rem; border-radius: 6px;
+    }
+    .method.get { background: rgba(59, 130, 246, 0.15); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .method.post { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .method.all { background: rgba(139, 92, 246, 0.15); color: #8b5cf6; border: 1px solid rgba(139, 92, 246, 0.3); }
+    .path { font-family: 'JetBrains Mono', monospace; font-size: 0.95rem; color: #a5b4fc; }
+    .copy-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.5rem 0.75rem;
+      border-radius: 8px; cursor: pointer;
+      font-size: 0.875rem; font-weight: 500;
+      transition: all 0.2s;
+    }
+    .copy-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .tools-list { display: grid; grid-template-columns: 1fr; gap: 0.75rem; }
+    .tool-item {
+      background: rgba(255, 255, 255, 0.01);
+      border: 1px solid var(--border);
+      border-radius: 12px; padding: 1rem;
+    }
+    .tool-name { font-family: 'JetBrains Mono', monospace; color: #818cf8; font-weight: 600; font-size: 0.95rem; margin-bottom: 0.25rem; }
+    .tool-desc { color: var(--text-muted); font-size: 0.875rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Copper CRM MCP Server</h1>
+        <div class="subtitle">Model Context Protocol interface for Copper</div>
+      </div>
+      <div class="status-badge">
+        <div class="status-dot"></div>
+        Online
+      </div>
+    </header>
+
+    <div class="info-grid">
+      <div class="info-card">
+        <div class="info-label">Protocol</div>
+        <div class="info-value">MCP (SSE / HTTP)</div>
+      </div>
+      <div class="info-card">
+        <div class="info-label">Authentication</div>
+        <div class="info-value">${noAuth ? 'None' : 'Google OAuth'}</div>
+      </div>
+      <div class="info-card">
+        <div class="info-label">Version</div>
+        <div class="info-value">1.0.0</div>
+      </div>
+    </div>
+
+    <div class="section-title">Available Endpoints</div>
+    <div class="endpoint-list">
+      <div class="endpoint-item">
+        <div class="endpoint-info">
+          <span class="method all">ALL</span>
+          <span class="path">/mcp</span>
+        </div>
+        <button class="copy-btn" onclick="copyEndpoint('/mcp')">Copy URL</button>
+      </div>
+      <div class="endpoint-item">
+        <div class="endpoint-info">
+          <span class="method get">GET</span>
+          <span class="path">/sse</span>
+        </div>
+        <button class="copy-btn" onclick="copyEndpoint('/sse')">Copy URL</button>
+      </div>
+      <div class="endpoint-item">
+        <div class="endpoint-info">
+          <span class="method post">POST</span>
+          <span class="path">/messages</span>
+        </div>
+        <button class="copy-btn" onclick="copyEndpoint('/messages')">Copy URL</button>
+      </div>
+    </div>
+
+    <div class="section-title">Registered MCP Tools</div>
+    <div class="tools-list">
+      <div class="tool-item">
+        <div class="tool-name">search_people</div>
+        <div class="tool-desc">Search Copper contacts by name, email, or phone.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">get_person</div>
+        <div class="tool-desc">Get full details of a Copper contact by their ID.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">create_person</div>
+        <div class="tool-desc">Create a new person (contact) in Copper CRM.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">update_person</div>
+        <div class="tool-desc">Update an existing person in Copper CRM.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">search_companies</div>
+        <div class="tool-desc">Search Copper companies by name.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">list_activity_types</div>
+        <div class="tool-desc">List available activity types (Note, Meeting, Phone Call, etc.).</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">create_activity</div>
+        <div class="tool-desc">Log an activity against a Copper person or company.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">list_opportunities</div>
+        <div class="tool-desc">Search deals with enriched fields, ISO dates, and pagination metadata.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">summarize_opportunities</div>
+        <div class="tool-desc">Aggregate deals by stage, status, or owner — full dataset, no pagination needed.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">get_pipeline_funnel</div>
+        <div class="tool-desc">Funnel view for a pipeline with per-stage metrics and YTD won/lost summary.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">get_stale_opportunities</div>
+        <div class="tool-desc">Find open deals not updated in the last N days.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">list_activities</div>
+        <div class="tool-desc">Search activities with resolved parent names and filters.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">list_pipelines</div>
+        <div class="tool-desc">List all pipelines with their stages and IDs.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function copyEndpoint(path) {
+      const fullUrl = window.location.origin + path;
+      navigator.clipboard.writeText(fullUrl).then(() => {
+        const btn = event.target;
+        const originalText = btn.textContent;
+        btn.textContent = 'Copied!';
+        btn.style.background = '#10b981';
+        btn.style.borderColor = '#10b981';
+        setTimeout(() => {
+          btn.textContent = originalText;
+          btn.style.background = '';
+          btn.style.borderColor = '';
+        }, 1500);
+      });
+    }
+  </script>
+</body>
+</html>`);
+    });
 
     // =============================================================================
     // STREAMABLE HTTP TRANSPORT (PROTOCOL VERSION 2025-11-25)
@@ -637,7 +426,9 @@ async function main() {
         process.exit(1);
       }
       console.log(`Copper MCP Server listening on port ${port}`);
-      console.log(`OAuth discovery: ${serverUrl}/.well-known/oauth-authorization-server`);
+      if (!noAuth) {
+        console.log(`OAuth discovery: ${serverUrl}/.well-known/oauth-authorization-server`);
+      }
       console.log(`Endpoints: ${serverUrl}/mcp  |  ${serverUrl}/sse`);
     });
 
