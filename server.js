@@ -420,6 +420,8 @@ async function main() {
       }
     });
 
+    app.use((_req, res) => res.redirect("/"));
+
     app.listen(port, (error) => {
       if (error) {
         console.error("Failed to start server:", error);
