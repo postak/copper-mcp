@@ -3,6 +3,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { rateLimit } from "express-rate-limit";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { randomUUID } from "node:crypto";
@@ -34,6 +35,18 @@ async function main() {
 
     const app = createMcpExpressApp({ host: "0.0.0.0" });
     app.set("trust proxy", 1); // Trust Cloud Run's load balancer for X-Forwarded-For
+
+    // Rate limiting to prevent abuse
+    const apiLimiter = rateLimit({
+      windowMs: 5 * 60 * 1000, // 5 minutes
+      max: 200, // Limit each IP to 200 requests per `window`
+      message: { jsonrpc: "2.0", error: { code: -32000, message: "Too many requests, please try again later." }, id: null }
+    });
+    app.use("/mcp", apiLimiter);
+    app.use("/sse", apiLimiter);
+    app.use("/messages", apiLimiter);
+    app.use("/google/callback", apiLimiter);
+
     const transports = {};
 
     let bearerAuth = (req, res, next) => next();
