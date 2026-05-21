@@ -189,7 +189,7 @@ FILTERS (all optional, combinable):
 
 RESPONSE: results[], total_count (upper bound from Copper), page, page_size, has_more.
 Fields per deal: id, name, company_id, company_name, monetary_value, currency, status,
-pipeline_id, pipeline_stage_id, pipeline_stage_name, owner_id, win_probability,
+pipeline_id, pipeline_stage_id, pipeline_stage_name, owner_id, owner_name, win_probability,
 close_date (ISO), created_at (ISO), updated_at (ISO), tags, won_reason, lost_reason.
 Use fields[] to restrict returned fields and reduce response size.
 
@@ -279,9 +279,13 @@ sort_direction: "asc" or "desc".`,
 
       const { data: results, total_count } = await copperFetchWithMeta("/opportunities/search", { method: "POST", body });
 
-      if (!pipelinesMap) pipelinesMap = await fetchPipelinesMap();
+      const [resolvedPipelinesMap, usersMap] = await Promise.all([
+        pipelinesMap ? Promise.resolve(pipelinesMap) : fetchPipelinesMap(),
+        fetchUsersMap(),
+      ]);
+      pipelinesMap = resolvedPipelinesMap;
 
-      let mapped = results.map((o) => mapOpportunity(o, pipelinesMap.byId));
+      let mapped = results.map((o) => mapOpportunity(o, pipelinesMap.byId, usersMap));
 
       if (fields && fields.length > 0) {
         mapped = mapped.map((o) => {
@@ -325,7 +329,10 @@ Returns totals and per-group counts with open/won/lost values and win-probabilit
       maximum_close_date: z.union([z.number(), z.string()]).optional().describe("Max close date: ISO 8601 or Unix timestamp"),
     },
     async ({ group_by = "pipeline_stage_id", pipeline_ids, pipeline_name, status_ids, status, company_ids, tags, minimum_close_date, maximum_close_date }) => {
-      const pipelinesMap = await fetchPipelinesMap();
+      const [pipelinesMap, usersMap] = await Promise.all([
+        fetchPipelinesMap(),
+        group_by === "owner_id" ? fetchUsersMap() : Promise.resolve(null),
+      ]);
       let resolvedPipelineIds = pipeline_ids;
       if (pipeline_name) {
         const found = pipelinesMap.byName.get(pipeline_name.toLowerCase());
@@ -365,7 +372,7 @@ Returns totals and per-group counts with open/won/lost values and win-probabilit
           label = STATUS_LABELS[key] ?? `Status ${key}`;
         } else {
           key = o.assignee_id ?? o.owner_id ?? "unassigned";
-          label = key === "unassigned" ? "Unassigned" : `Owner ${key}`;
+          label = key === "unassigned" ? "Unassigned" : (usersMap?.get(key)?.name ?? `Owner ${key}`);
         }
 
         if (!groups.has(key)) {
@@ -570,6 +577,16 @@ Returns open deals not updated in the last N days, sorted by inactivity (most st
         })
       );
       return jsonResult(activities);
+    }
+  );
+
+  server.tool(
+    "list_users",
+    "List all Copper CRM users. Returns user IDs, names, and emails. Useful for resolving owner_id to owner_name when building filters or displaying deal ownership.",
+    {},
+    async () => {
+      const usersMap = await fetchUsersMap();
+      return jsonResult([...usersMap.values()]);
     }
   );
 

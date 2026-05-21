@@ -107,9 +107,10 @@ export async function fetchUsersMap() {
   return byId;
 }
 
-export function mapOpportunity(o, pipelinesById = null) {
+export function mapOpportunity(o, pipelinesById = null, usersMap = null) {
   const pipeline = pipelinesById?.get(o.pipeline_id);
   const stage = pipeline?.stagesById?.get(o.pipeline_stage_id);
+  const ownerId = o.assignee_id ?? o.owner_id ?? null;
   return {
     id: o.id,
     name: o.name,
@@ -121,7 +122,8 @@ export function mapOpportunity(o, pipelinesById = null) {
     pipeline_id: o.pipeline_id,
     pipeline_stage_id: o.pipeline_stage_id,
     pipeline_stage_name: stage?.name ?? null,
-    owner_id: o.assignee_id ?? o.owner_id ?? null,
+    owner_id: ownerId,
+    owner_name: ownerId && usersMap ? (usersMap.get(ownerId)?.name ?? null) : null,
     win_probability: o.win_probability,
     close_date: toISODate(o.close_date),
     created_at: toISODate(o.date_created),
