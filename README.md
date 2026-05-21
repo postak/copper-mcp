@@ -89,12 +89,14 @@ gcloud config set project YOUR_PROJECT_ID
 ```
 ### 1. Create Oauth Client in Google Cloud Console
 
-In Google Cloud console, go to **APIs & Services → Credentials**
+### Google OAuth setup
 
-Create a new **OAuth client ID** with type **Web application**
-Set **Authorized redirect URIs** to `https://<cloud-run-url>/google/callback`
+Create an OAuth 2.0 client in **Google Cloud Console → API & Services → Credentials**:
+- Type: **Web application**
+- Consent screen: set to **Internal** (restricts access to your Workspace domain)
+- Authorized redirect URI: `https://<cloud-run-url>/google/callback`
 
-cloud-run-url: "https://<servicename>-<projectnumber>.<region>.run.app"
+get `client_id` and `client_secret` to use below with secret manager.
 
 ### 2. Create secrets in Secret Manager
 
@@ -143,12 +145,7 @@ gcloud run deploy ${SERVICE} \
 
 On first connection Claude Desktop will open the browser for Google login.
 
-### Google OAuth setup
 
-Create an OAuth 2.0 client in **Google Cloud Console → API & Services → Credentials**:
-- Type: **Web application**
-- Consent screen: set to **Internal** (restricts access to your Workspace domain)
-- Authorized redirect URI: `https://<cloud-run-url>/google/callback`
 
 ## License
 
