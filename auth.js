@@ -92,20 +92,67 @@ export function createGoogleOAuthProvider({ serverUrl, googleClientId, googleCli
           exp: now + 3600,
           client_id: client.client_id,
           scopes: [],
+          type: "access",
+        }, jwtSecret),
+        refresh_token: signJwt({
+          sub: entry.email,
+          iss: serverUrl,
+          aud: serverUrl,
+          iat: now,
+          exp: now + 30 * 24 * 3600, // 30 days
+          client_id: client.client_id,
+          scopes: [],
+          type: "refresh",
         }, jwtSecret),
         token_type: "bearer",
         expires_in: 3600,
       };
     },
 
-    async exchangeRefreshToken() {
-      throw new Error("Refresh tokens not supported — re-authenticate to get a new token");
+    async exchangeRefreshToken(client, refreshToken) {
+      try {
+        const payload = verifyJwt(refreshToken, jwtSecret);
+        const now = Math.floor(Date.now() / 1000);
+        
+        if (payload.exp < now) throw new Error("Token expired");
+        if (payload.iss !== serverUrl) throw new Error("Invalid issuer");
+        if (payload.type !== "refresh") throw new Error("Invalid token type");
+        if (payload.client_id !== client.client_id) throw new Error("Client ID mismatch");
+
+        return {
+          access_token: signJwt({
+            sub: payload.sub,
+            iss: serverUrl,
+            aud: serverUrl,
+            iat: now,
+            exp: now + 3600,
+            client_id: client.client_id,
+            scopes: [],
+            type: "access",
+          }, jwtSecret),
+          refresh_token: signJwt({
+            sub: payload.sub,
+            iss: serverUrl,
+            aud: serverUrl,
+            iat: now,
+            exp: now + 30 * 24 * 3600, // Extend refresh token for another 30 days
+            client_id: client.client_id,
+            scopes: [],
+            type: "refresh",
+          }, jwtSecret),
+          token_type: "bearer",
+          expires_in: 3600,
+        };
+      } catch (err) {
+        throw new Error("Invalid refresh token: " + err.message);
+      }
     },
 
     async verifyAccessToken(token) {
       const payload = verifyJwt(token, jwtSecret);
       if (payload.exp < Math.floor(Date.now() / 1000)) throw new Error("Token expired");
       if (payload.iss !== serverUrl) throw new Error("Invalid issuer");
+      if (payload.type === "refresh") throw new Error("Cannot use refresh token as access token");
       return {
         token,
         clientId: payload.client_id,
