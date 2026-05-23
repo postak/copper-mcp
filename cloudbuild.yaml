@@ -36,11 +36,10 @@ steps:
       # Secrets must be created in Secret Manager before first deploy:
       #   gcloud secrets create COPPER_API_KEY --data-file=-
       #   gcloud secrets create COPPER_USER_EMAIL --data-file=-
-      #   gcloud secrets create COPPER_USER_ID --data-file=-
       #   gcloud secrets create COPPER_GOOGLE_CLIENT_ID --data-file=-
       #   gcloud secrets create COPPER_GOOGLE_CLIENT_SECRET --data-file=-
       #   gcloud secrets create COPPER_JWT_SECRET --data-file=-
-      - --set-secrets=COPPER_API_KEY=COPPER_API_KEY:latest,COPPER_USER_EMAIL=COPPER_USER_EMAIL:latest,COPPER_USER_ID=COPPER_USER_ID:latest,COPPER_GOOGLE_CLIENT_ID=COPPER_GOOGLE_CLIENT_ID:latest,COPPER_GOOGLE_CLIENT_SECRET=COPPER_GOOGLE_CLIENT_SECRET:latest,COPPER_JWT_SECRET=COPPER_JWT_SECRET:latest
+      - --set-secrets=COPPER_API_KEY=COPPER_API_KEY:latest,COPPER_USER_EMAIL=COPPER_USER_EMAIL:latest,COPPER_GOOGLE_CLIENT_ID=COPPER_GOOGLE_CLIENT_ID:latest,COPPER_GOOGLE_CLIENT_SECRET=COPPER_GOOGLE_CLIENT_SECRET:latest,COPPER_JWT_SECRET=COPPER_JWT_SECRET:latest
 
 images:
   - ${_IMAGE}:${SHORT_SHA}

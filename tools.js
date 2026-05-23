@@ -162,7 +162,6 @@ export function createServer() {
       const body = {
         parent: { type: parent_type, id: parent_id },
         type: { id: activity_type_id, category: "user" },
-        user_id: parseInt(process.env.COPPER_USER_ID),
         details,
       };
       if (activity_date) body.activity_date = activity_date;
@@ -385,9 +384,9 @@ Returns totals and per-group counts with open/won/lost values and win-probabilit
         g.count++;
         g.weighted_value += val * (prob / 100);
         const s = o.status;
-        if (s === 0 || s === "Open")           g.value_open      += val;
-        else if (s === 1 || s === "Won")       g.value_won       += val;
-        else if (s === 2 || s === "Lost")      g.value_lost      += val;
+        if (s === 0 || s === "Open") g.value_open += val;
+        else if (s === 1 || s === "Won") g.value_won += val;
+        else if (s === 2 || s === "Lost") g.value_lost += val;
         else if (s === 3 || s === "Abandoned") g.value_abandoned += val;
       }
 

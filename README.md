@@ -39,7 +39,6 @@ This implementation starts from the work of dazanzan https://github.com/dazanza/
    Required environment variables:
    - `COPPER_API_KEY` - Your Copper API key
    - `COPPER_USER_EMAIL` - Your Copper account email
-   - `COPPER_USER_ID` - Your Copper user ID
 
 ### Example of usage as an MCP server for Claude Code running locally
 
@@ -54,7 +53,6 @@ Add to your Claude Code MCP config (`~/.claude.json`):
       "env": {
         "COPPER_API_KEY": "your-api-key",
         "COPPER_USER_EMAIL": "your-email",
-        "COPPER_USER_ID": "your-user-id"
       }
     }
   }
@@ -118,7 +116,6 @@ get `client_id` and `client_secret` to use below with secret manager.
 ```bash
 echo -n "your-copper-api-key"    | gcloud secrets create COPPER_API_KEY    --data-file=-
 echo -n "your-copper-email"      | gcloud secrets create COPPER_USER_EMAIL  --data-file=-
-echo -n "your-copper-user-id"    | gcloud secrets create COPPER_USER_ID     --data-file=-
 echo -n "your-google-client-id"  | gcloud secrets create COPPER_GOOGLE_CLIENT_ID   --data-file=-
 echo -n "your-google-secret"     | gcloud secrets create COPPER_GOOGLE_CLIENT_SECRET --data-file=-
 openssl rand -base64 32          | gcloud secrets create COPPER_JWT_SECRET         --data-file=-
@@ -141,7 +138,7 @@ gcloud run deploy ${SERVICE} \
   --no-allow-unauthenticated \
   --port=8080 \
   --set-env-vars=NODE_ENV=production,SERVER_URL=${SERVER_URL} \
-  --set-secrets=COPPER_API_KEY=COPPER_API_KEY:latest,COPPER_USER_EMAIL=COPPER_USER_EMAIL:latest,COPPER_USER_ID=COPPER_USER_ID:latest,COPPER_GOOGLE_CLIENT_ID=COPPER_GOOGLE_CLIENT_ID:latest,COPPER_GOOGLE_CLIENT_SECRET=COPPER_GOOGLE_CLIENT_SECRET:latest,COPPER_JWT_SECRET=COPPER_JWT_SECRET:latest
+  --set-secrets=COPPER_API_KEY=COPPER_API_KEY:latest,COPPER_USER_EMAIL=COPPER_USER_EMAIL:latest,COPPER_GOOGLE_CLIENT_ID=COPPER_GOOGLE_CLIENT_ID:latest,COPPER_GOOGLE_CLIENT_SECRET=COPPER_GOOGLE_CLIENT_SECRET:latest,COPPER_JWT_SECRET=COPPER_JWT_SECRET:latest
 ```
 
 ### 4. Configure Claude Desktop

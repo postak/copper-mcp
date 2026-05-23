@@ -12,14 +12,13 @@ import { createGoogleOAuthProvider } from "./auth.js";
 import { createServer } from "./tools.js";
 
 if (typeof process.loadEnvFile === "function") {
-  try { process.loadEnvFile(); } catch {}
+  try { process.loadEnvFile(); } catch { }
 }
 
 const API_KEY = process.env.COPPER_API_KEY;
 const USER_EMAIL = process.env.COPPER_USER_EMAIL;
-const USER_ID = process.env.COPPER_USER_ID;
-if (!API_KEY || !USER_EMAIL || !USER_ID) {
-  console.error("COPPER_API_KEY, COPPER_USER_EMAIL, and COPPER_USER_ID environment variables are required");
+if (!API_KEY || !USER_EMAIL) {
+  console.error("COPPER_API_KEY and COPPER_USER_EMAIL environment variables are required");
   process.exit(1);
 }
 
@@ -450,7 +449,7 @@ async function main() {
     process.on("SIGINT", async () => {
       console.log("Shutting down...");
       for (const sessionId in transports) {
-        try { await transports[sessionId].close(); } catch {}
+        try { await transports[sessionId].close(); } catch { }
         delete transports[sessionId];
       }
       process.exit(0);
