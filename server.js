@@ -302,6 +302,14 @@ async function main() {
         <div class="tool-desc">Search deals with enriched fields, ISO dates, and pagination metadata.</div>
       </div>
       <div class="tool-item">
+        <div class="tool-name">create_opportunity</div>
+        <div class="tool-desc">Create a new opportunity (deal/task) in Copper CRM.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">update_opportunity</div>
+        <div class="tool-desc">Update an existing opportunity (deal/task) in Copper CRM.</div>
+      </div>
+      <div class="tool-item">
         <div class="tool-name">summarize_opportunities</div>
         <div class="tool-desc">Aggregate deals by stage, status, or owner — full dataset, no pagination needed.</div>
       </div>

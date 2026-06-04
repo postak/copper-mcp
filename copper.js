@@ -1,4 +1,4 @@
-import { toISODate } from "./utils.js";
+import { toISODate, parseCopperCloseDate } from "./utils.js";
 
 const BASE_URL = "https://api.copper.com/developer_api/v1";
 let HEADERS = {};
@@ -125,7 +125,7 @@ export function mapOpportunity(o, pipelinesById = null, usersMap = null) {
     owner_id: ownerId,
     owner_name: ownerId && usersMap ? (usersMap.get(ownerId)?.name ?? null) : null,
     win_probability: o.win_probability,
-    close_date: toISODate(o.close_date),
+    close_date: parseCopperCloseDate(o.close_date),
     created_at: toISODate(o.date_created),
     updated_at: toISODate(o.date_modified),
     tags: o.tags ?? [],

@@ -15,6 +15,7 @@ import {
   toUnixTimestamp,
   toISODate,
   parseStatusInput,
+  toCopperCloseDate,
 } from "./utils.js";
 
 export function createServer() {
@@ -300,6 +301,200 @@ sort_direction: "asc" or "desc".`,
         : results.length === effectivePageSize;
 
       return jsonResult({ results: mapped, total_count, page: currentPage, page_size: effectivePageSize, has_more });
+    }
+  );
+
+  server.tool(
+    "create_opportunity",
+    "Create a new opportunity (deal/task) in Copper CRM.",
+    {
+      name: z.string().describe("The name of the opportunity"),
+      pipeline_id: z.number().optional().describe("Copper pipeline ID"),
+      pipeline_name: z.string().optional().describe("Case-insensitive pipeline name (used to resolve pipeline_id)"),
+      pipeline_stage_id: z.number().optional().describe("Copper stage ID within the pipeline"),
+      pipeline_stage_name: z.string().optional().describe("Case-insensitive stage name within the selected pipeline (used to resolve pipeline_stage_id)"),
+      primary_contact_id: z.number().optional().describe("Copper ID of the primary contact person"),
+      company_id: z.number().optional().describe("Copper ID of the associated company"),
+      monetary_value: z.number().optional().describe("Monetary value of the opportunity"),
+      win_probability: z.number().optional().describe("Win probability (0 to 100)"),
+      close_date: z.union([z.number(), z.string()]).optional().describe("Expected close date. Can be ISO string (YYYY-MM-DD), MM/DD/YYYY, or Unix timestamp (seconds or milliseconds)"),
+      owner_id: z.number().optional().describe("Copper ID of the user owning the opportunity"),
+      tags: z.array(z.string()).optional().describe("Tags for the opportunity"),
+      details: z.string().optional().describe("Description / details of the opportunity"),
+      status: z.enum(["Open", "Won", "Lost", "Abandoned"]).optional().describe("Status of the opportunity"),
+      priority: z.enum(["None", "Low", "Medium", "High"]).optional().describe("Priority level of the opportunity"),
+    },
+    async ({
+      name, pipeline_id, pipeline_name, pipeline_stage_id, pipeline_stage_name,
+      primary_contact_id, company_id, monetary_value, win_probability,
+      close_date, owner_id, tags, details, status, priority
+    }) => {
+      let resolvedPipelineId = pipeline_id;
+      let pipelinesMap = null;
+
+      if (pipeline_name || pipeline_stage_name) {
+        pipelinesMap = await fetchPipelinesMap();
+        if (pipeline_name) {
+          const found = pipelinesMap.byName.get(pipeline_name.toLowerCase());
+          if (!found) return errorResult(`Pipeline not found: "${pipeline_name}". Use list_pipelines to see available pipelines.`);
+          resolvedPipelineId = found.id;
+        }
+      }
+
+      let resolvedStageId = pipeline_stage_id;
+      if (pipeline_stage_name) {
+        if (!pipelinesMap) {
+          pipelinesMap = await fetchPipelinesMap();
+        }
+        const searchIn = resolvedPipelineId
+          ? [pipelinesMap.byId.get(resolvedPipelineId)].filter(Boolean)
+          : [...pipelinesMap.byId.values()];
+        
+        let foundStageId = null;
+        for (const p of searchIn) {
+          const stageId = p.stagesByName.get(pipeline_stage_name.toLowerCase());
+          if (stageId !== undefined) {
+            foundStageId = stageId;
+            if (!resolvedPipelineId) {
+              resolvedPipelineId = p.id;
+            }
+            break;
+          }
+        }
+        if (foundStageId === null) {
+          return errorResult(`Stage not found: "${pipeline_stage_name}". Use list_pipelines to see available stages.`);
+        }
+        resolvedStageId = foundStageId;
+      }
+
+      const body = { name };
+      if (resolvedPipelineId !== undefined) body.pipeline_id = resolvedPipelineId;
+      if (resolvedStageId !== undefined) body.pipeline_stage_id = resolvedStageId;
+      if (primary_contact_id !== undefined) body.primary_contact_id = primary_contact_id;
+      if (company_id !== undefined) body.company_id = company_id;
+      if (monetary_value !== undefined) body.monetary_value = monetary_value;
+      if (win_probability !== undefined) body.win_probability = win_probability;
+      if (owner_id !== undefined) body.assignee_id = owner_id;
+      if (tags !== undefined) body.tags = tags;
+      if (details !== undefined) body.details = details;
+      if (status !== undefined) body.status = status;
+      if (priority !== undefined) body.priority = priority;
+
+      if (close_date !== undefined) {
+        const formattedCloseDate = toCopperCloseDate(close_date);
+        if (formattedCloseDate) {
+          body.close_date = formattedCloseDate;
+        }
+      }
+
+      const result = await copperFetch("/opportunities", { method: "POST", body });
+
+      const [resolvedPipelinesMap, usersMap] = await Promise.all([
+        pipelinesMap ? Promise.resolve(pipelinesMap) : fetchPipelinesMap(),
+        fetchUsersMap(),
+      ]);
+
+      return jsonResult(mapOpportunity(result, resolvedPipelinesMap.byId, usersMap));
+    }
+  );
+
+  server.tool(
+    "update_opportunity",
+    "Update an existing opportunity (deal/task) in Copper CRM. Only include fields you want to change.",
+    {
+      opportunity_id: z.number().describe("The Copper opportunity ID to update"),
+      name: z.string().optional().describe("The name of the opportunity"),
+      pipeline_id: z.number().optional().describe("Copper pipeline ID"),
+      pipeline_name: z.string().optional().describe("Case-insensitive pipeline name (used to resolve pipeline_id)"),
+      pipeline_stage_id: z.number().optional().describe("Copper stage ID within the pipeline"),
+      pipeline_stage_name: z.string().optional().describe("Case-insensitive stage name within the selected pipeline (used to resolve pipeline_stage_id)"),
+      primary_contact_id: z.number().optional().nullable().describe("Copper ID of the primary contact person. Set to null to clear."),
+      company_id: z.number().optional().nullable().describe("Copper ID of the associated company. Set to null to clear."),
+      monetary_value: z.number().optional().nullable().describe("Monetary value of the opportunity. Set to null to clear."),
+      win_probability: z.number().optional().nullable().describe("Win probability (0 to 100). Set to null to clear."),
+      close_date: z.union([z.number(), z.string(), z.null()]).optional().describe("Expected close date. Can be ISO string (YYYY-MM-DD), MM/DD/YYYY, or Unix timestamp (seconds or milliseconds). Set to null to clear."),
+      owner_id: z.number().optional().nullable().describe("Copper ID of the user owning the opportunity. Set to null to clear."),
+      tags: z.array(z.string()).optional().describe("Tags for the opportunity"),
+      details: z.string().optional().nullable().describe("Description / details of the opportunity. Set to null to clear."),
+      status: z.enum(["Open", "Won", "Lost", "Abandoned"]).optional().describe("Status of the opportunity"),
+      priority: z.enum(["None", "Low", "Medium", "High"]).optional().describe("Priority level of the opportunity"),
+    },
+    async ({
+      opportunity_id, name, pipeline_id, pipeline_name, pipeline_stage_id, pipeline_stage_name,
+      primary_contact_id, company_id, monetary_value, win_probability,
+      close_date, owner_id, tags, details, status, priority
+    }) => {
+      let resolvedPipelineId = pipeline_id;
+      let pipelinesMap = null;
+
+      if (pipeline_name || pipeline_stage_name) {
+        pipelinesMap = await fetchPipelinesMap();
+        if (pipeline_name) {
+          const found = pipelinesMap.byName.get(pipeline_name.toLowerCase());
+          if (!found) return errorResult(`Pipeline not found: "${pipeline_name}". Use list_pipelines to see available pipelines.`);
+          resolvedPipelineId = found.id;
+        }
+      }
+
+      let resolvedStageId = pipeline_stage_id;
+      if (pipeline_stage_name) {
+        if (!pipelinesMap) {
+          pipelinesMap = await fetchPipelinesMap();
+        }
+        const searchIn = resolvedPipelineId
+          ? [pipelinesMap.byId.get(resolvedPipelineId)].filter(Boolean)
+          : [...pipelinesMap.byId.values()];
+        
+        let foundStageId = null;
+        for (const p of searchIn) {
+          const stageId = p.stagesByName.get(pipeline_stage_name.toLowerCase());
+          if (stageId !== undefined) {
+            foundStageId = stageId;
+            if (!resolvedPipelineId) {
+              resolvedPipelineId = p.id;
+            }
+            break;
+          }
+        }
+        if (foundStageId === null) {
+          return errorResult(`Stage not found: "${pipeline_stage_name}". Use list_pipelines to see available stages.`);
+        }
+        resolvedStageId = foundStageId;
+      }
+
+      const body = {};
+      if (name !== undefined) body.name = name;
+      if (resolvedPipelineId !== undefined) body.pipeline_id = resolvedPipelineId;
+      if (resolvedStageId !== undefined) body.pipeline_stage_id = resolvedStageId;
+      if (primary_contact_id !== undefined) body.primary_contact_id = primary_contact_id;
+      if (company_id !== undefined) body.company_id = company_id;
+      if (monetary_value !== undefined) body.monetary_value = monetary_value;
+      if (win_probability !== undefined) body.win_probability = win_probability;
+      if (owner_id !== undefined) body.assignee_id = owner_id;
+      if (tags !== undefined) body.tags = tags;
+      if (details !== undefined) body.details = details;
+      if (status !== undefined) body.status = status;
+      if (priority !== undefined) body.priority = priority;
+
+      if (close_date !== undefined) {
+        if (close_date === null) {
+          body.close_date = null;
+        } else {
+          const formattedCloseDate = toCopperCloseDate(close_date);
+          if (formattedCloseDate) {
+            body.close_date = formattedCloseDate;
+          }
+        }
+      }
+
+      const result = await copperFetch(`/opportunities/${opportunity_id}`, { method: "PUT", body });
+
+      const [resolvedPipelinesMap, usersMap] = await Promise.all([
+        pipelinesMap ? Promise.resolve(pipelinesMap) : fetchPipelinesMap(),
+        fetchUsersMap(),
+      ]);
+
+      return jsonResult(mapOpportunity(result, resolvedPipelinesMap.byId, usersMap));
     }
   );
 

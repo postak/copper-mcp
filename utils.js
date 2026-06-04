@@ -61,3 +61,41 @@ export function parseStatusInput(statuses) {
     return mapped;
   });
 }
+
+export function toCopperCloseDate(value) {
+  if (value === undefined || value === null) return undefined;
+  let d;
+  if (typeof value === "number") {
+    const ms = value < 10000000000 ? value * 1000 : value;
+    d = new Date(ms);
+  } else if (typeof value === "string") {
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(value)) {
+      return value;
+    }
+    const parsed = Date.parse(value);
+    if (isNaN(parsed)) return undefined;
+    d = new Date(parsed);
+  }
+  if (!d || isNaN(d.getTime())) return undefined;
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${mm}/${dd}/${yyyy}`;
+}
+
+export function parseCopperCloseDate(value) {
+  if (!value) return null;
+  if (typeof value === "string") {
+    const match = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (match) {
+      const [_, mm, dd, yyyy] = match;
+      return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      return value;
+    }
+  }
+  return toISODate(value);
+}
+
+
