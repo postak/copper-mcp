@@ -791,5 +791,193 @@ Returns open deals not updated in the last N days, sorted by inactivity (most st
     async () => jsonResult(await copperFetch("/pipelines"))
   );
 
+  const importPeopleHandler = async ({ people }) => {
+    try {
+      const payload = people.map((p) => {
+        const item = {};
+        if (p.name) {
+          item.name = p.name;
+        } else if (p.first_name || p.last_name) {
+          item.name = [p.first_name, p.last_name].filter(Boolean).join(" ");
+        }
+        if (p.first_name) item.first_name = p.first_name;
+        if (p.last_name) item.last_name = p.last_name;
+        if (p.title) item.title = p.title;
+        if (p.company_name) item.company_name = p.company_name;
+        if (p.company_id) item.company_id = p.company_id;
+        if (p.emails) item.emails = p.emails;
+        if (p.phone_numbers) item.phone_numbers = p.phone_numbers;
+        if (p.tags) item.tags = p.tags;
+        if (p.contact_type_id) item.contact_type_id = p.contact_type_id;
+        if (p.details) item.details = p.details;
+        return item;
+      });
+
+      console.log(`[import_people] Starting import of ${payload.length} people...`);
+      let results;
+      try {
+        console.log(`[import_people] Trying primary bulk endpoint with wrapped root key 'people': /people/bulk_create`);
+        results = await copperFetch("/people/bulk_create", { method: "POST", body: { people: payload } });
+        console.log(`[import_people] Primary bulk endpoint succeeded.`);
+      } catch (err) {
+        console.warn(`[import_people] Primary bulk endpoint failed: ${err.message}. Trying secondary bulk endpoint with wrapped root key 'people': /people/bulk/create...`);
+        try {
+          results = await copperFetch("/people/bulk/create", { method: "POST", body: { people: payload } });
+          console.log(`[import_people] Secondary bulk endpoint succeeded.`);
+        } catch (err2) {
+          console.warn(`[import_people] Secondary bulk endpoint failed: ${err2.message}. Falling back to resilient individual single creations...`);
+          results = [];
+          for (const item of payload) {
+            console.log(`[import_people] Resiliently creating person: ${item.name || "Unnamed"}`);
+            try {
+              const res = await copperFetch("/people", { method: "POST", body: item });
+              results.push(res);
+            } catch (errFallback) {
+              console.error(`[import_people] Fallback creation failed for person "${item.name || "Unnamed"}":`, errFallback);
+              results.push({ error: errFallback.message, record: item });
+            }
+          }
+          console.log(`[import_people] Individual fallback complete.`);
+        }
+      }
+      return jsonResult(results);
+    } catch (err) {
+      console.error(`[import_people] Error occurred during import:`, err);
+      return errorResult(`Error in import_people: ${err.message}`);
+    }
+  };
+
+  const importCompanyHandler = async ({ companies }) => {
+    try {
+      const payload = companies.map((c) => {
+        const item = { name: c.name };
+        if (c.details) item.details = c.details;
+        if (c.email_domain) item.email_domain = c.email_domain;
+        if (c.address) item.address = c.address;
+        if (c.phone_numbers) item.phone_numbers = c.phone_numbers;
+        if (c.websites) item.websites = c.websites;
+        if (c.tags) item.tags = c.tags;
+        return item;
+      });
+
+      console.log(`[import_companies] Starting import of ${payload.length} companies...`);
+      let results;
+      try {
+        console.log(`[import_companies] Trying primary bulk endpoint with wrapped root key 'companies': /companies/bulk_create`);
+        results = await copperFetch("/companies/bulk_create", { method: "POST", body: { companies: payload } });
+        console.log(`[import_companies] Primary bulk endpoint succeeded.`);
+      } catch (err) {
+        console.warn(`[import_companies] Primary bulk endpoint failed: ${err.message}. Trying secondary bulk endpoint with wrapped root key 'companies': /companies/bulk/create...`);
+        try {
+          results = await copperFetch("/companies/bulk/create", { method: "POST", body: { companies: payload } });
+          console.log(`[import_companies] Secondary bulk endpoint succeeded.`);
+        } catch (err2) {
+          console.warn(`[import_companies] Secondary bulk endpoint failed: ${err2.message}. Falling back to resilient individual single creations...`);
+          results = [];
+          for (const item of payload) {
+            console.log(`[import_companies] Resiliently creating company: ${item.name}`);
+            try {
+              const res = await copperFetch("/companies", { method: "POST", body: item });
+              results.push(res);
+            } catch (errFallback) {
+              console.error(`[import_companies] Fallback creation failed for company "${item.name}":`, errFallback);
+              results.push({ error: errFallback.message, record: item });
+            }
+          }
+          console.log(`[import_companies] Individual fallback complete.`);
+        }
+      }
+      return jsonResult(results);
+    } catch (err) {
+      console.error(`[import_companies] Error occurred during import:`, err);
+      return errorResult(`Error in import_companies: ${err.message}`);
+    }
+  };
+
+  server.tool(
+    "import_people",
+    "Bulk import multiple people (contacts) into Copper CRM in a single request.",
+    {
+      people: z.array(z.object({
+        first_name: z.string().optional().describe("First name"),
+        last_name: z.string().optional().describe("Last name"),
+        name: z.string().optional().describe("Full name (alternative to first_name/last_name)"),
+        title: z.string().optional().describe("Job title"),
+        company_name: z.string().optional().describe("Company name"),
+        company_id: z.number().optional().describe("Company ID (if already exists)"),
+        emails: z.array(z.object({
+          email: z.string(),
+          category: z.enum(["work", "personal", "other"]).optional()
+        })).optional().describe("Email addresses"),
+        phone_numbers: z.array(z.object({
+          number: z.string(),
+          category: z.enum(["work", "mobile", "home", "other"]).optional()
+        })).optional().describe("Phone numbers"),
+        tags: z.array(z.string()).optional().describe("Tags for categorization"),
+        contact_type_id: z.number().optional().describe("Contact type ID"),
+        details: z.string().optional().describe("About/details description")
+      })).describe("Array of people to import")
+    },
+    importPeopleHandler
+  );
+
+  server.tool(
+    "import_companies",
+    "Bulk import multiple companies into Copper CRM in a single request.",
+    {
+      companies: z.array(z.object({
+        name: z.string().describe("Company name"),
+        details: z.string().optional().describe("About/details description"),
+        email_domain: z.string().optional().describe("Company email domain"),
+        address: z.object({
+          street: z.string().optional(),
+          city: z.string().optional(),
+          state: z.string().optional(),
+          postal_code: z.string().optional(),
+          country: z.string().optional()
+        }).optional().describe("Company physical address"),
+        phone_numbers: z.array(z.object({
+          number: z.string(),
+          category: z.enum(["work", "other"]).optional()
+        })).optional().describe("Phone numbers"),
+        websites: z.array(z.object({
+          url: z.string(),
+          category: z.enum(["work", "personal", "other"]).optional()
+        })).optional().describe("Websites"),
+        tags: z.array(z.string()).optional().describe("Tags for categorization")
+      })).describe("Array of companies to import")
+    },
+    importCompanyHandler
+  );
+
+  server.tool(
+    "import_company",
+    "Bulk import multiple companies into Copper CRM in a single request (singular alias).",
+    {
+      companies: z.array(z.object({
+        name: z.string().describe("Company name"),
+        details: z.string().optional().describe("About/details description"),
+        email_domain: z.string().optional().describe("Company email domain"),
+        address: z.object({
+          street: z.string().optional(),
+          city: z.string().optional(),
+          state: z.string().optional(),
+          postal_code: z.string().optional(),
+          country: z.string().optional()
+        }).optional().describe("Company physical address"),
+        phone_numbers: z.array(z.object({
+          number: z.string(),
+          category: z.enum(["work", "other"]).optional()
+        })).optional().describe("Phone numbers"),
+        websites: z.array(z.object({
+          url: z.string(),
+          category: z.enum(["work", "personal", "other"]).optional()
+        })).optional().describe("Websites"),
+        tags: z.array(z.string()).optional().describe("Tags for categorization")
+      })).describe("Array of companies to import")
+    },
+    importCompanyHandler
+  );
+
   return server;
 }
